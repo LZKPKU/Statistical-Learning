@@ -1,0 +1,361 @@
+---
+title: "Statistical Learning \\ Homework VI Report"
+author: "Li Zekun"
+date: "December 20, 2017"
+output: pdf_document
+---
+
+# Problem 1 Adaboost
+
+Adaboost is a powerful method to enhance many weak classifiers and combine them toghther to become a new strong classifier. 
+
+## Generating data
+
+In this problem, we have training data with 10 properties, each generated from normal Gaussian distribution. Labels are determined by thier sum. We let $y_i = 1$ if $\sum_{j=1}^{10}x_{ij} >9.34$, $y_i = -1$ otherwise.
+
+
+```{r}
+# Parameter
+p = 10;n = 10000;ntest = 10000;M=3000;
+# Training Process
+X = matrix(nrow=n,ncol=p)
+y = vector(length=n)
+# generating training data
+for (i in 1:p)
+  X[,i] = rnorm(n,0,1)
+for (i in 1:n)
+  y[i] = sum(X[i,]^2)
+y[y<=9.34] = -1
+y[y>9.34]=1
+```
+
+## Decision Stump
+
+We use decision stumps as our weak classifiers. According to description in slides, we need four arrays to store the model, which are $f,x,s,\alpha$, iteration number is another parameter we need to choose. Training algorithm for decision stump is clear and simple, however we need to notice it's a $O(Mn^2p)$ process, which means when $n$ is very large, it costs a lot to train this model. In my experiment, if we just apply $O(Mn^2p)$ training algorithm, it takes $5$ hours to train an adaboost model with $n=1000$,$M=400$. And its accuracy is $88.5\%$ on another test set generated randomly.
+
+## Dynamic Programming to accelerate training process
+
+```{r}
+# save parameters of each classifier
+f = vector(length=M)
+x = vector(length=M)
+s = vector(length=M)
+alpha = vector(length=M)
+
+# save weights
+w = vector(length=n)
+w[1:n] = rep(1/n,1)
+```
+
+We need more complicated data structure to save some calculation results. First we need to sort $x_{ij}$ at each row $j$ and save them in a matrix. In order to find corresponding $y_i$ and $w_i$, we need another $2$ matrices to save the relationships between indeces.
+
+```{r}
+# construct data structure
+Sorted_X = matrix(nrow=n,ncol=p)
+Order = matrix(nrow=n,ncol=p)
+Y = matrix(nrow=n,ncol=p)
+W = matrix(nrow=n,ncol=p)
+
+for (j in 1:p)
+{ #Sorted_X[i,j] stores the i-th smallest value of jth row.
+  #X[i,j] belongs to y[Order[i,j]]
+  Sorted_X[,j] = sort(X[,j])
+  Order[,j] = order(X[,j])
+  Y[1:n,j] = y[Order[1:n,j]]
+}
+
+```
+
+Because $s$ could be $1$ or $-1$, we need to consider both decision stumps, but it's worth noting that their loss function could be calculated by each other. So it's fine for us to calculate only one of them. 
+
+```{r}
+# training enumerate each stump
+# L_left means < -> 1
+# L_right means < -> -1 
+L_left = matrix(nrow=n,ncol=p) 
+L_right = matrix(nrow=n,ncol=p)
+```
+
+Then we iterate $M$ time to train $M$ weak classifier. Theoratically, in each iteration, we need to enumerate $2np$ decision stumps, calculating thier loss function and find the smallest one.i.e.
+
+$$\min\limits_{j,s}\sum_kD_k(\hat{y_k}(x_j,s)-y_k)^2$$
+
+But do we really need to get their loss function at $O(Mn^2p)$ cost? The answer is no. Just notice if we cut at $x_k$ and have the loss function, now we change $x_k$ to $x_{k+1}$ ($x$ is sorted already), we can simply make one comparison to get new loss function. That's to say, if we save more calculation results and use information more efficiently, we could finish our training process at $O(Mnp)$ cost.
+
+```{r}
+tic = Sys.time()
+for(t in 1:M){  
+  #print(t)
+  W[1:n,1:p] = w[Order[1:n,1:p]]
+  # dynamic programming
+  for(j in 1:p){
+    L_left[1,j] = 2+2*sum(W[,j]*Y[,j])
+    for(i in 2:n)
+      L_left[i,j]=L_left[i-1,j]-Y[i-1,j]*W[i-1,j]
+    
+    L_right = 4 - L_left
+    leftmin = min(L_left)
+    rightmin = min(L_right)
+  }
+  # find min error and its index, save the parameters
+  if(leftmin<rightmin){
+    s[t] = 1
+    r = which(L_left == leftmin, arr.ind = TRUE)[1,1]
+    c = which(L_left == leftmin, arr.ind = TRUE)[1,2]
+    f[t] = c
+    x[t] = Sorted_X[r,c]
+    err = leftmin/4
+  }
+  else{
+    s[t] = -1
+    r = which(L_right == rightmin, arr.ind = TRUE)[1,1]
+    c = which(L_right == rightmin, arr.ind = TRUE)[1,2]
+    f[t] = c
+    x[t] = Sorted_X[r,c]
+    err = rightmin/4
+  }
+  # calculate alpha
+  alpha[t] = log((1-err)/err)
+  # update weights
+  for(i in 1:n){
+    if(s[t] == 1){
+      if(X[i,f[t]]<x[t]){
+        if(y[i] == -1){
+          w[i]=w[i]*exp(alpha[t])
+        }
+      }
+      else{
+        if(y[i] == 1){
+          w[i]=w[i]*exp(alpha[t])
+        }
+      }
+    }
+    else{
+      if(X[i,f[t]]<x[t]){
+        if(y[i] == 1){
+          w[i]=w[i]*exp(alpha[t])
+        }
+      }
+      else{
+        if(y[i] == -1){
+          w[i]=w[i]*exp(alpha[t])
+        }
+      }
+    }
+  }
+  # normalization
+  w = w/sum(w)
+}
+toc = Sys.time()
+# f, s, alpha, x save the model
+```
+
+## Testing Process
+
+After training, we need to generate another test dataset to test classifier's ability. I use a function to make prediction. It's more natural and user-friendly.
+
+```{r}
+# Testing Process
+#generating test data
+Xtest = matrix(nrow=ntest,ncol=p)
+ytest = vector(length=ntest)
+for (i in 1:p)
+  Xtest[,i] = rnorm(n,0,1)
+for (i in 1:ntest)
+  ytest[i] = sum(Xtest[i,]^2)
+ytest[ytest<=9.34] = -1
+ytest[ytest>9.34] = 1
+
+# prediction function
+Adaboost_predict<-function(Xtest,f,s,alpha,x){
+ 
+  # number of weak classifiers
+  M = length(x)
+  ntest = nrow(Xtest)
+  y_pred = vector(length=ntest)
+  for(t in 1:M){
+    if (s[t] == 1){
+      for (i in 1:ntest){
+        if(Xtest[i,f[t]]<x[t]){
+          y_pred[i] = y_pred[i] + alpha[t]*1}
+        else{
+          y_pred[i] = y_pred[i] + alpha[t]*(-1)}
+      }
+    }
+    else{
+      for (i in 1:ntest){
+        if(Xtest[i,f[t]]<x[t]){
+          y_pred[i] = y_pred[i] + alpha[t]*(-1)}
+        else{
+          y_pred[i] = y_pred[i] + alpha[t]*1}
+      }
+    }
+  }
+  y_pred[y_pred<=0] = -1
+  y_pred[y_pred>0] = 1
+  return(y_pred)
+}
+```
+
+Finally, let's have a look at its accuracy on train set and test set.
+
+```{r}
+# accuracy on training set
+y_hat = Adaboost_predict(X,f,s,alpha,x)
+acc_train = sum(y_hat==y)/n
+# accuracy on testing set
+y_pred = Adaboost_predict(Xtest,f,s,alpha,x)
+acc_test = sum(y_pred==ytest)/ntest
+
+acc_train
+acc_test
+toc - tic
+```
+
+We have pretty good result when $M=3000$, $n=10000$ in a relatively short time.
+
+# Problem 2 Spam Data
+
+In this problem, we use 5 methods to analysis spam data, which are General Additive Model(GAM), Logistic Regression, CART, MARS and Gradient Boosting method.
+
+## Preprocessing
+
+```{r eval=FALSE}
+library(mgcv)
+library(tree)
+library(prim)
+library(earth)
+library(gbm)
+```
+
+```{r include=FALSE}
+library(mgcv)
+library(tree)
+library(prim)
+library(earth)
+library(gbm)
+```
+
+```{r}
+data = read.csv("spam.csv",header = FALSE)
+testset = array()
+trainset = array()
+n = nrow(data)
+set = 1:n
+
+testset = set[data["V59"]==1]
+trainset = set[data["V59"]==0]
+
+trainx = data[,-(58:59)]
+trainy = data[,58]
+# To deal with long-tail distribution of data
+trainx = log(trainx+0.1)
+
+# test set and train set
+testy = trainy[testset]
+trainy = trainy[trainset]
+testx = trainx[testset,]
+trainx = trainx[trainset,]
+```
+
+## General Additive Model
+
+In R package $mgcv$, we have $gam$ to use this model on spam data. I had some trouble in dealing with the paramter 'formula' in the function. At last, I used some tricks about strings to solve it.
+
+```{r}
+# Part I GAM
+
+# string trick to have correct formula
+V <- paste(paste("s(V",1:57,",k=4)",sep=""),collapse = '+')
+form <- paste("trainy~",V,sep = "")
+form = formula(form)
+tic = Sys.time()
+GAM = gam(formula = form,data = as.data.frame(trainx,trainy),family = "binomial")
+toc = Sys.time()
+
+GAMpred = predict(GAM,newdata = testx,type="response")
+GAMhat = ifelse(GAMpred>=0.5,1,0)
+
+accGAM = sum(as.numeric((GAMhat == testy)))/length(testset)
+1-accGAM
+toc-tic
+```
+
+Although it is very slow, accuracy of this model is pretty good.
+
+## Logistic Regression
+
+In ESL, logistic regression serves as a comparison with GAM, we can simply call $glm$ function in $mgcv$ to use this model.
+
+```{r}
+# Part II Logistic Regression
+tic = Sys.time()
+LR = glm(trainy~.,data = data.frame(trainx,trainy),family="binomial")
+toc = Sys.time()
+LRpred = predict(LR,newdata = data.frame(testx),type="response")
+LRhat = ifelse(LRpred>=0.5,1,0)
+
+accLR = sum(as.numeric((LRhat == testy)))/length(testset)
+1-accLR
+toc-tic
+```
+
+We get similar result to that in the book. Logistic Regression is very fast and have high accuracy as well.
+
+## CART
+We use R package $tree$ to construct a classification tree model to analysis spam data. This time, we need 10-fold cross validation to select best tree model. I try to draw a graph showing the relationship between tree size and accuracy. Finally, I get a similar graph to that in the book.
+
+
+```{r}
+# Part III Classification Tree
+trainyy = as.factor(trainy)
+testyy = as.factor(testy)
+Tree = tree(trainyy~.,data = data.frame(trainx,trainyy),mindev=0)
+Treecv = cv.tree(Tree,FUN=prune.misclass,K=10)
+size = sort(Treecv$size)[-1]
+accTree = (max(Treecv$dev))/3065
+for (i in size){
+  prune = prune.misclass(Tree,best=i)
+  Treepred = predict(prune,newdata = testx,type="class")
+  accTree = c(accTree,sum(as.numeric((Treepred != testyy)))/length(testset))
+}
+plot(sort(Treecv$size) ,accTree,type="b",col="green",ylim=c(0,0.5))
+lines(sort(Treecv$size),sort(Treecv$dev/3065,decreasing=TRUE),type="b",col="orange")
+i = which(accTree==min(accTree))
+accTree[i]
+```
+
+## MARS
+
+I use $earth$ package to construct a MARS model. According to our book, I choose 2 degree interaction and have same result as that in the book. Also, this model is very fast.
+
+
+```{r}
+# Part IV MARS
+tic = Sys.time()
+MARS = earth::earth(trainy~.,data = data.frame(trainx,trainy),degree=2)
+toc = Sys.time()
+MARSpred = predict(MARS,newdata = testx,type="class")
+accMARS = sum(as.numeric((MARSpred == testy)))/length(testset)
+1-accMARS
+toc-tic
+```
+
+## Gradient Boosting Method
+
+My last model is gradient boosting method. It performs best in all five models. I use cross validation to choose proper number of trees and interaction depth. With interaction.depth=5, cv chooses out best n.trees and make accurate prediction.
+
+```{r}
+# Part V Gradient Boosting Method
+tic = Sys.time()
+GBM = gbm(trainy~.,data=data.frame(trainx,trainy),n.trees=3000,distribution="bernoulli",
+          interaction.depth=5,shrinkage = 0.01, cv.folds=5)
+toc = Sys.time()
+best.itr = gbm.perf(GBM,method="cv")
+best.itr
+GBMpred = predict(GBM,newdata = testx,best.itr)
+GBMpred = ifelse(GBMpred>=0.5,1,0)
+accGBM = sum(as.numeric((GBMpred == testy)))/length(testset)
+1-accGBM
+toc-tic
+```

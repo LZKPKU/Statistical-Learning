@@ -1,0 +1,231 @@
+---
+title: "统计学习第二次作业"
+author: "李泽坤"
+date: "2017年10月9日"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+这次作业中，我要利用lars, MASS, leaps, glmnet等包，采用LS, Best Subset, Ridge, Lasso等多种模型对Prostate数据集进行分析，以下是我的分析过程和结果。
+
+## 数据准备
+
+从https://web.stanford.edu/~hastie/ElemStatLearn/ 上下载Prostate数据集，通过数据描述我们可以看到共有lcavol, lweight, age, lbph, svi, lcp, gleason, pgg45 等8个自变量，lpsa是我们要解释的变量。train变量是为了复刻书中试验所划分的训练集与测试集。我们首先通过一段代码读取数据。
+
+```{r eval=F}
+library("lars")
+library("glmnet")
+library("MASS")
+library("leaps")
+rawdata = read.table(file.choose())
+```
+
+```{r include=F}
+library("lars")
+library("glmnet")
+library("MASS")
+library("leaps")
+rawdata = read.table(file.choose())
+```
+
+根据data info中的建议，我们将对除lspa的数据做scale，同时train一列为布尔型变量，所以我们做scale前要去掉它。 然后我们再对数据做进一步的预处理，划分出训练集和测试集。
+
+```{r}
+tr = rawdata['train']
+rawdata['train']=NULL
+Y = rawdata['lpsa']
+data = rawdata[,1:8]
+data = scale(data,TRUE,TRUE)
+train = data[tr$train,]
+test = data[!tr$train,]
+Xtrain = as.matrix(train[,1:8])
+Ytrain = Y[tr$train,]
+Xtest = as.matrix(test[,1:8])
+Xtest = cbind(1,Xtest)
+Ytest = Y[!tr$train,]
+```
+
+这样划分的好处是之后进行回归、测试、预测以及计算test error时更加清晰。同时，为了简化代码，我按照公式自己写了cal_err函数，之后的每一个模型都利用它在测 试集上计算test error以及相应的standard error.
+
+```{r}
+cal_err<-function(y,yhat){
+  len = length(y)
+  tvar = (sum((y-yhat)^2))/len
+  terr = sqrt(tvar)
+  stderr = sqrt(sum(((y-yhat)^2-tvar)^2)/(len*(len-1)))
+  c(tvar,stderr)
+}
+```
+
+
+## Model 1: Linear Regression
+
+```{r}
+LRM = lm(Ytrain~Xtrain)
+```
+
+得到如下结果:
+
+```{r}
+summary(LRM)
+```
+
+利用拟合出的回归直线在测试集上计算test error以及standard error.
+
+```{r}
+LRM_coef = LRM$coefficients
+LRM_coef
+yhat = Xtest%*%LRM_coef
+LRM_testerr = cal_err(Ytest,yhat)[1]
+LRM_stderr = cal_err(Ytest,yhat)[2]
+```
+
+最终计算出的结果为：
+
+```{r}
+LRM_testerr
+LRM_stderr
+```
+
+## Model 2:Best Subset
+
+这一部分有较多种的实现方式，我尝试了三种方法，先来看第一种。
+
+### 第一种方法——leaps
+
+```{r}
+train = data.frame(train)
+BS = regsubsets(lpsa~lcavol+lweight+age+lbph+svi+lcp+gleason+pgg45,data=rawdata,method="exhaustive")
+summary(BS)
+```
+
+这种方式给出了对于每一个变量个数，它选出以它的标准而言最好的模型，通过查阅函数的文档，我发现leaps包中可以用R2,改进后的R2,还有Mallows Cp准则来选择,这里我选了默认的Mallows Cp准则。得到的结果就是全模型，与LS中的一致。
+
+###第二种方法——MASS
+
+```{r}
+BS = lm(Ytrain~Xtrain)
+BS_chosen = stepAIC(BS,direction = "backward")
+```
+
+这是一种贪心法，采用的是后退法，即从全模型开始逐渐删除变量，标准是AIC准则，我们可以看到它最后还是选出了一个含8个变量的模型。
+
+```{r}
+BS_coef = BS_chosen$coefficients
+BS_coef
+yhat = Xtest%*%BS_coef
+BS_testerr = cal_err(Ytest,yhat)[1]
+BS_stderr = cal_err(Ytest,yhat)[2]
+```
+
+最终计算出的结果为：
+
+```{r}
+BS_testerr
+BS_stderr
+```
+
+###第三种方法——lars
+
+lars包也可以做之后的lasso回归，可以通过调整参数的方式来实现best subset.
+
+```{r}
+BS = lars(Xtrain,Ytrain,type="stepwise",normalize=TRUE)
+BS
+BScv=cv.lars(Xtrain,Ytrain,K=10,type='stepwise')
+```
+从BScv的图中我们可以看到，CV-MSE在第2步之后趋于稳定，为了简化模型，我们直接选取只含有2个参数的模型。通过查看BS，我们知道这两个变量应该是lcavol和lweight.
+```{r}
+BS = lm(Ytrain~Xtrain[,1]+Xtrain[,2])
+BS_coef = coef(BS)
+BS_coef
+yhat = Xtest[,1:3]%*%BS_coef
+BS_testerr = cal_err(Ytest,yhat)[1]
+BS_stderr = cal_err(Ytest,yhat)[2]
+BS_testerr
+BS_stderr
+```
+
+这样得到的结果与书中表完全一致。当然，还有一种选择方法，也是遍历全局各种参数组合，然后选择test error比较小的同时standard error也比较小的模型，根据本例所要达到的目标，这是比较合理的。
+
+##Model 3:Ridge Regression
+
+Ridge Regression是一种shrinkage的方法，但它的变量选择作用并不是很强，从实验的结果中也可以看出。我运用了glmnet包来进行Ridge Regression.
+
+```{r}
+RR = glmnet(x = Xtrain,y = Ytrain,family="gaussian",alpha=0)
+plot(RR,xvar = "lambda")
+```
+
+这里，alpha=0意味着岭回归，若是alpha=1，就是我们之后要做的lasso回归，这中间的一系列值就是被称作Elastic-Net的回归族，glmnet包正是通过Elastic-Net来实现GLM(广义线性回归)，这也解释了这个包名字的由来。之后我们进行cross validation.
+
+```{r}
+RRcv = cv.glmnet(x=Xtrain,y=Ytrain,family = "gaussian",alpha = 0,nfold=10)
+plot(RRcv)
+```
+
+从这个RRcv图中，我们大致可以看出合适的$\lambda$值，不过glmnet包里有自动选择的方法。
+
+```{r}
+RR_chosen = glmnet(x=Xtrain,y=Ytrain,family="gaussian",alpha=0,lambda=RRcv$lambda.min)
+
+RR_coef = coef(RR_chosen,mode="fraction")
+RR_coef
+yhat = Xtest%*%RR_coef
+RR_testerr = cal_err(Ytest,yhat)[1]
+RR_stderr = cal_err(Ytest,yhat)[2]
+RR_testerr
+RR_stderr
+```  
+
+通过选择模型的系数我们可以看出，Ridge Regression 并没有减少参数个数，只是进行了相应的shrinkage. 得到的test error和standard error要优于LS.
+
+## Model 4: Lasso Regression
+
+最后一个就是Lasso Regression.
+
+```{r}
+lasso = glmnet(x=Xtrain,y=Ytrain,family="gaussian",alpha=1)
+plot(lasso,xvar="lambda")
+lassocv = cv.glmnet(x=Xtrain,y=Ytrain,family="gaussian",alpha=1)
+plot(lassocv)
+```
+
+步骤与Ridge几乎一样，只不过alpha=1.值得注意的是，在选择最优\(\lambda\)时，glmnet包提供了两个值，一个是lambda.min，一个是lambda.1se，我们分别实验一下。
+
+```{r}
+lasso_chosen = glmnet(x=Xtrain,y=Ytrain,family="gaussian",alpha=1,lambda = lassocv$lambda.min)
+lasso_coef = coef(lasso_chosen)
+lasso_coef
+yhat = Xtest%*%lasso_coef
+lasso_testerr = cal_err(Ytest,yhat)[1]
+lasso_stderr = cal_err(Ytest,yhat)[2]
+
+lasso_testerr
+lasso_stderr
+```
+
+这里lambda.min表示误差最小，而lambda.1se表示误差最小一个标准差内，所得到的模型更简单，如下所示:
+
+```{r}
+lasso_chosen = glmnet(x=Xtrain,y=Ytrain,family="gaussian",alpha=1,lambda = lassocv$lambda.1se)
+lasso_coef = coef(lasso_chosen)
+lasso_coef
+yhat = Xtest%*%lasso_coef
+lasso_testerr = cal_err(Ytest,yhat)[1]
+lasso_stderr = cal_err(Ytest,yhat)[2]
+
+lasso_testerr
+lasso_stderr
+```
+
+两个值都是可以的，可以根据具体情况来使用。再观察Lasso的估计值，我们发现有三个变量都被去掉了，达到了变量选择的目的。
+
+总的来说，这四种方法都有比较简单易用的R语言包来支持，其功能上也各有特色，可以灵活地选取这些方式来进行数据分析。做本次作业中一个比较大的收获是了解到了Lasso和Ridge可以通过Elastic-Net实现统一。下面是按照TABLE 3.3的格式制作的结果，在实验多次后，我发现每次的实验结果并不完全相同，这可能是cv过程的不稳定性导致的。
+
+以下是其中一次实验的总的结果，可能与上述代码运行的略有区别：
+
+![](E:\My University\My Course\2017-2018第一学期\统计学习\第二次作业\result.png)
